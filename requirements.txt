@@ -1,0 +1,6 @@
+flask>=3.0
+pyjwt[crypto]>=2.8
+requests>=2.31
+jsonschema[format]>=4.21
+prometheus-client>=0.20
+gunicorn>=21.2
