@@ -87,6 +87,19 @@ def main():
          requests.patch(f"{base}/api/users/me", headers=hb, verify=False,
                         json={"role": "admin", "credits": 999999, "display_name": "Bob"}))
 
+    # 4. Security misconfiguration - open CORS + verbose errors + missing headers.
+    print("\n[4] API8 Security misconfiguration")
+    r = requests.get(f"{base}/api/health", headers={"Origin": "https://evil.example"}, verify=False)
+    print(f"  CORS reflect evil origin: Access-Control-Allow-Origin={r.headers.get('Access-Control-Allow-Origin')}"
+          f"  Allow-Credentials={r.headers.get('Access-Control-Allow-Credentials')}")
+    missing = [h for h in ("X-Content-Type-Options", "X-Frame-Options", "Content-Security-Policy")
+               if h not in r.headers]
+    print(f"  missing security headers: {missing or 'none'}")
+    r = requests.get(f"{base}/api/orders", params={"limit": "abc"}, verify=False)
+    body = r.json() if r.headers.get("content-type", "").startswith("application/json") else {}
+    print(f"  verbose error (GET /api/orders?limit=abc): HTTP {r.status_code}"
+          f"  exception={body.get('exception')}  traceback_lines={len(body.get('traceback', []))}")
+
     print("\nDone. Re-run against the SECURE_MODE=true deployment to see each attack fail.")
 
 

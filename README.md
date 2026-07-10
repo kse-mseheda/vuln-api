@@ -30,6 +30,7 @@ fix is readable, not hidden.
 | **API2** Broken Authentication | any | trusts the JWT payload **without** verifying the signature - forge any identity | verifies the Keycloak signature via JWKS (issuer, expiry, `alg`) |
 | **API1** Broken Object Level Authz (BOLA) | `GET /api/orders/<id>` | returns **any** order to any caller | the caller must **own** the order, else `403` |
 | **API3** Broken Object Property Authz (mass assignment) | `PATCH /api/users/me` | binds the **whole body**, so `{"role":"admin"}` escalates | **allowlist DTO + JSON Schema** (`additionalProperties: false`); unknown/privileged fields are `400` |
+| **API8** Security Misconfiguration | every response; `GET /api/orders?limit=abc` | **open CORS** (reflects any Origin + credentials), **no security headers**, **verbose errors** (stack trace + config leaked on a 500) | strict single-origin CORS, hardening headers, generic `500` (detail stays in the log) |
 
 ## Endpoints
 
@@ -38,8 +39,11 @@ fix is readable, not hidden.
 | GET | `/api/health` | - | reports `secure_mode` |
 | GET | `/metrics` | - | Prometheus exposition |
 | GET | `/api/me` | Bearer | the caller's profile |
+| GET | `/api/orders` | Bearer | list own orders; `?limit=abc` triggers the verbose-error demo (API8) |
 | GET | `/api/orders/<id>` | Bearer | BOLA target |
 | PATCH | `/api/users/me` | Bearer | mass-assignment target |
+
+Every response also carries the CORS + security-header behavior for **API8**.
 
 Identities line up with the lab Keycloak users **alice** and **bob** (password ==
 username). alice owns orders `o-1001`/`o-1002`; bob owns `o-1003`.
@@ -55,6 +59,7 @@ line on stdout (`kubectl logs`) and as a Prometheus counter at `/metrics`.
 | `api_bola_crossuser_total{outcome}` | a caller asked for an object it does not own (`served` in vuln mode, `denied` in secure mode) - BOLA / sequential-ID probing |
 | `api_mass_assignment_total{outcome}` | a PATCH carried fields outside the allowlist (`accepted` vuln, `rejected` secure) |
 | `api_privilege_escalation_total` | a caller changed a privileged field (`role`/`credits`) on itself - the mass-assignment exploit landed |
+| `api_server_errors_total` | unhandled 5xx - a verbose-error / misconfiguration signal (API8) |
 | `api_requests_total{endpoint,method,status}` | all requests |
 
 These are what the practice alerts on with a `PrometheusRule` + Alertmanager.
@@ -65,6 +70,7 @@ These are what the practice alerts on with a `PrometheusRule` + Alertmanager.
 |-----|---------|
 | `SECURE_MODE` | `false` |
 | `KEYCLOAK_ISSUER_URI` | `https://keycloak.192.168.50.10.nip.io/realms/api-security` |
+| `ALLOWED_ORIGIN` | `https://app.192.168.50.10.nip.io` (the one CORS origin allowed in secure mode) |
 | `OAUTH_CA_BUNDLE` | unset (TLS verify off - lab uses a self-signed CA) |
 
 ## Run the attacks

@@ -35,6 +35,7 @@ import logging
 import os
 import sys
 import time
+import traceback
 import uuid
 
 import jwt  # PyJWT
@@ -42,6 +43,7 @@ import requests
 from flask import Flask, g, jsonify, request
 from jsonschema import Draft202012Validator
 from prometheus_client import Counter, generate_latest, CONTENT_TYPE_LATEST
+from werkzeug.exceptions import HTTPException
 
 # --- config (env-overridable; defaults target the course lab) ----------------
 SECURE_MODE = os.environ.get("SECURE_MODE", "false").lower() in ("1", "true", "yes")
@@ -53,6 +55,8 @@ JWKS_URI = f"{ISSUER}/protocol/openid-connect/certs"
 # The lab uses a self-signed internal CA. Point OAUTH_CA_BUNDLE at a CA file to verify;
 # otherwise TLS verification of the JWKS fetch is skipped (lab only).
 VERIFY = os.environ.get("OAUTH_CA_BUNDLE", False)
+# The single browser origin the API is meant to serve (used only in secure mode).
+ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "https://app.192.168.50.10.nip.io")
 
 app = Flask(__name__)
 
@@ -96,6 +100,8 @@ PRIV_ESCALATION = Counter(
     "Times a caller changed a privileged field (role/credits) on themselves")
 REQUESTS = Counter(
     "api_requests_total", "All API requests", ["endpoint", "method", "status"])
+SERVER_ERRORS = Counter(
+    "api_server_errors_total", "Unhandled 5xx errors (a verbose-error / misconfig signal)")
 
 
 # --- demo data (in-memory; resets on restart) --------------------------------
@@ -212,11 +218,62 @@ def _assign_request_id():
     g.request_id = request.headers.get("X-Request-Id", uuid.uuid4().hex[:12])
 
 
+@app.before_request
+def _cors_preflight():
+    # Answer CORS preflight so the after_request CORS headers are what the
+    # browser sees. The interesting misconfig is in _cors_and_headers below.
+    if request.method == "OPTIONS":
+        return ("", 204)
+
+
 @app.after_request
 def _count_request(resp):
     if request.endpoint and request.endpoint != "metrics":
         REQUESTS.labels(request.endpoint, request.method, str(resp.status_code)).inc()
     return resp
+
+
+@app.after_request
+def _cors_and_headers(resp):
+    """API8 Security Misconfiguration: CORS + security headers.
+
+    VULN: reflect ANY Origin and allow credentials, so any website can make the
+    browser send the user's cookies/token and then READ the response. No
+    hardening headers at all.
+    FIX: echo only a single allowlisted origin (no credentials wildcard), and set
+    the standard hardening headers.
+    """
+    origin = request.headers.get("Origin")
+    if SECURE_MODE:
+        if origin and origin == ALLOWED_ORIGIN:
+            resp.headers["Access-Control-Allow-Origin"] = ALLOWED_ORIGIN
+            resp.headers["Vary"] = "Origin"
+        resp.headers["X-Content-Type-Options"] = "nosniff"
+        resp.headers["X-Frame-Options"] = "DENY"
+        resp.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+        resp.headers["Referrer-Policy"] = "no-referrer"
+        resp.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    elif origin:
+        resp.headers["Access-Control-Allow-Origin"] = origin          # reflect anything
+        resp.headers["Access-Control-Allow-Credentials"] = "true"     # ... with credentials
+    return resp
+
+
+@app.errorhandler(Exception)
+def _handle_error(e):
+    """API8 verbose errors. VULN: return the stack trace + internals to the client.
+    FIX: a generic message; the detail stays in the server log only."""
+    if isinstance(e, HTTPException):
+        return e   # real 404/405/400 etc. pass through unchanged
+    SERVER_ERRORS.inc()
+    audit("server_error", "error", exception=type(e).__name__, detail=str(e))
+    if SECURE_MODE:
+        return jsonify(error="internal_error"), 500
+    return jsonify(error="internal_error",
+                   exception=f"{type(e).__name__}: {e}",
+                   traceback=traceback.format_exc().splitlines(),
+                   python=sys.version,
+                   env_sample={k: os.environ.get(k) for k in ("SECURE_MODE", "KEYCLOAK_ISSUER_URI")}), 500
 
 
 def _deny_auth(err: AuthError):
@@ -243,6 +300,20 @@ def me():
     except AuthError as e:
         return _deny_auth(e)
     return jsonify(user)
+
+
+@app.get("/api/orders")
+def list_orders():
+    """List the caller's orders. The ?limit param is parsed BEFORE anything else,
+    so a non-numeric value (e.g. ?limit=abc) raises and hits the error handler -
+    showing API8 verbose errors: in vulnerable mode the client gets the stack trace."""
+    n = int(request.args.get("limit", "10"))   # ValueError -> unhandled -> 500
+    try:
+        user = current_user()
+    except AuthError as e:
+        return _deny_auth(e)
+    mine = [o for o in ORDERS.values() if o["owner"] == user["username"]]
+    return jsonify(orders=mine[:n])
 
 
 @app.get("/api/orders/<order_id>")
