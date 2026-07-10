@@ -71,7 +71,6 @@ These are what the practice alerts on with a `PrometheusRule` + Alertmanager.
 
 ```bash
 pip install -r requirements.txt
-python demo/attack.py                    # add LAB_INGRESS_IP off-lab if needed
 python demo/attack.py --base https://vuln-api.192.168.50.10.nip.io
 ```
 
